@@ -38,8 +38,11 @@ class TransformerModel(nn.Module):
 
         self.n_out = n_out
         self.nhid = nhid
+        
+        # 添加映射层，将 ModelWithAttention 的输出维度映射到 Transformer 的输入维度  
+        self.projection_layer = nn.Linear(100, ninp)  # 假设 ModelWithAttention 的 embed_dim=100
 
-        self.init_weights()
+        self.init_weights() 
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -96,7 +99,77 @@ class TransformerModel(nn.Module):
             for attn in attns:
                 nn.init.zeros_(attn.out_proj.weight)
                 nn.init.zeros_(attn.out_proj.bias)
+               
+    def forward(self, src, src_mask=None, single_eval_pos=None):  
+        # 如果 src 不是元组，自动转换为 (None, src, None)  
+        if not isinstance(src, tuple):  
+            src = (None, src, None)  
 
+        # 如果 src 是 (x, y)，补充 style 为 None  
+        if len(src) == 2:  # (x, y) and no style  
+            src = (None,) + src  
+
+        style_src, x_src, y_src = src  
+
+        # 检查 x_src 是否为张量  
+        if not isinstance(x_src, torch.Tensor):  
+            raise TypeError(f"x_src must be a torch.Tensor, but got {type(x_src)}")  
+
+        # 如果 x_src 已经是嵌入特征，直接使用  
+        if x_src is not None and len(x_src.shape) == 3:  # (seq_len, batch_size, embed_dim)  
+            embedded_features = x_src  
+        else:  
+            x_src = self.encoder(x_src)  # 原始输入通过编码器生成嵌入  
+            if isinstance(x_src, tuple):  # 如果 encoder 返回的是 tuple  
+                x_src = x_src[0]  # 提取第一个返回值（embedded_features）  
+            embedded_features = x_src  
+
+        # 检查 embedded_features 是否为张量  
+        if not isinstance(embedded_features, torch.Tensor):  
+            raise TypeError(f"embedded_features must be a torch.Tensor, but got {type(embedded_features)}")  
+
+        # 如果嵌入特征的维度与 Transformer 的输入维度不匹配，使用映射层  
+        if embedded_features.shape[-1] != self.ninp:  
+            embedded_features = self.projection_layer(embedded_features)  
+
+        # 其余逻辑保持不变  
+        style_src = self.style_encoder(style_src).unsqueeze(0) if self.style_encoder else \
+            torch.tensor([], device=embedded_features.device)  
+        global_src = torch.tensor([], device=embedded_features.device) if self.global_att_embeddings is None else \
+            self.global_att_embeddings.weight.unsqueeze(1).repeat(1, embedded_features.shape[1], 1)  
+
+        if src_mask is not None: assert self.global_att_embeddings is None or isinstance(src_mask, tuple)  
+        if src_mask is None:  
+            if self.global_att_embeddings is None:  
+                full_len = len(embedded_features) + len(style_src)  
+                if self.full_attention:  
+                    src_mask = bool_mask_to_att_mask(torch.ones((full_len, full_len), dtype=torch.bool)).to(embedded_features.device)  
+                elif self.efficient_eval_masking:  
+                    src_mask = single_eval_pos + len(style_src)  
+                else:  
+                    src_mask = self.generate_D_q_matrix(full_len, len(embedded_features) - single_eval_pos).to(embedded_features.device)  
+            else:  
+                src_mask_args = (self.global_att_embeddings.num_embeddings,  
+                                 len(embedded_features) + len(style_src),  
+                                 len(embedded_features) + len(style_src) - single_eval_pos)  
+                src_mask = (self.generate_global_att_globaltokens_matrix(*src_mask_args).to(embedded_features.device),  
+                            self.generate_global_att_trainset_matrix(*src_mask_args).to(embedded_features.device),  
+                            self.generate_global_att_query_matrix(*src_mask_args).to(embedded_features.device))  
+
+        train_x = embedded_features[:single_eval_pos]  
+        src = torch.cat([global_src, style_src, train_x, embedded_features[single_eval_pos:]], 0)  
+
+        #if self.input_ln is not None:  
+        #    src = self.input_ln(src)  
+
+        if self.pos_encoder is not None:  
+            src = self.pos_encoder(src)  
+
+        output = self.transformer_encoder(src, src_mask)  
+        output = self.decoder(output)  
+        return output[single_eval_pos + len(style_src) + (self.global_att_embeddings.num_embeddings if self.global_att_embeddings else 0):]
+    
+    '''
     def forward(self, src, src_mask=None, single_eval_pos=None):
         assert isinstance(src, tuple), 'inputs (src) have to be given as (x,y) or (style,x,y) tuple'
 
@@ -142,7 +215,54 @@ class TransformerModel(nn.Module):
         output = self.transformer_encoder(src, src_mask)
         output = self.decoder(output)
         return output[single_eval_pos+len(style_src)+(self.global_att_embeddings.num_embeddings if self.global_att_embeddings else 0):]
+    '''
+    '''
+    def forward(self, src, src_mask=None, single_eval_pos=None):
+        assert isinstance(src, tuple), 'inputs (src) have to be given as (x,y) or (style,x,y) tuple'
 
+        if len(src) == 2: # (x,y) and no style
+            src = (None,) + src
+        
+        style_src, x_src, y_src = src
+
+        x_src = self.encoder(x_src)
+        y_src = self.y_encoder(y_src.unsqueeze(-1) if len(y_src.shape) < len(x_src.shape) else y_src)
+        style_src = self.style_encoder(style_src).unsqueeze(0) if self.style_encoder else \
+            torch.tensor([], device=x_src.device)
+        global_src = torch.tensor([], device=x_src.device) if self.global_att_embeddings is None else \
+            self.global_att_embeddings.weight.unsqueeze(1).repeat(1, x_src.shape[1], 1)
+
+        if src_mask is not None: assert self.global_att_embeddings is None or isinstance(src_mask, tuple)
+        if src_mask is None:
+            if self.global_att_embeddings is None:
+                full_len = len(x_src) + len(style_src)
+                if self.full_attention:
+                    src_mask = bool_mask_to_att_mask(torch.ones((full_len, full_len), dtype=torch.bool)).to(x_src.device)
+                elif self.efficient_eval_masking:
+                    src_mask = single_eval_pos + len(style_src)
+                else:
+                    src_mask = self.generate_D_q_matrix(full_len, len(x_src) - single_eval_pos).to(x_src.device)
+            else:
+                src_mask_args = (self.global_att_embeddings.num_embeddings,
+                                 len(x_src) + len(style_src),
+                                 len(x_src) + len(style_src) - single_eval_pos)
+                src_mask = (self.generate_global_att_globaltokens_matrix(*src_mask_args).to(x_src.device),
+                            self.generate_global_att_trainset_matrix(*src_mask_args).to(x_src.device),
+                            self.generate_global_att_query_matrix(*src_mask_args).to(x_src.device))
+
+        train_x = x_src[:single_eval_pos] + y_src[:single_eval_pos]
+        src = torch.cat([global_src, style_src, train_x, x_src[single_eval_pos:]], 0)
+
+        if self.input_ln is not None:
+            src = self.input_ln(src)
+
+        if self.pos_encoder is not None:
+            src = self.pos_encoder(src)
+
+        output = self.transformer_encoder(src, src_mask)
+        output = self.decoder(output)
+        return output[single_eval_pos+len(style_src)+(self.global_att_embeddings.num_embeddings if self.global_att_embeddings else 0):]
+    '''
     @torch.no_grad()
     def init_from_small_model(self, small_model):
         assert isinstance(self.decoder, nn.Linear) and isinstance(self.encoder, (nn.Linear, nn.Sequential)) \

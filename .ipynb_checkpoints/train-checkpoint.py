@@ -59,8 +59,8 @@ def train(priordataloader_class, criterion, encoder_generator, emsize=200, nhid=
     dl = priordataloader_class(num_steps=steps_per_epoch, batch_size=batch_size, eval_pos_seq_len_sampler=eval_pos_seq_len_sampler, seq_len_maximum=bptt+(bptt_extra_samples if bptt_extra_samples else 0), device=device, **extra_prior_kwargs_dict)
 
     #encoder = encoder_generator(dl.num_features, emsize)
-    encoder = encoder_generator(dl.num_features, emsize, config['output_dim'])
-    print(f"Initialized encoder: {encoder}")
+    encoder = encoder_generator(dl.num_features, emsize)
+    #print(f"Initialized encoder: {encoder}")
     #style_def = dl.get_test_batch()[0][0] # the style in batch of the form ((style, x, y), target, single_eval_pos)
     style_def = None
     #print(f'Style definition of first 3 examples: {style_def[:3] if style_def is not None else None}')
@@ -77,6 +77,7 @@ def train(priordataloader_class, criterion, encoder_generator, emsize=200, nhid=
                              pos_encoder=(pos_encoder_generator or positional_encodings.NoPositionalEncoding)(emsize, bptt*2),
                              decoder=decoder, init_method=initializer, efficient_eval_masking=efficient_eval_masking, **model_extra_args
                              )
+    print(model)
     model.criterion = criterion
     if load_weights_from_this_state_dict is not None:
         model.load_state_dict(load_weights_from_this_state_dict)
@@ -119,6 +120,35 @@ def train(priordataloader_class, criterion, encoder_generator, emsize=200, nhid=
         ignore_steps = 0
         before_get_batch = time.time()
         assert len(dl) % aggregate_k_gradients == 0, 'Please set the number of steps per epoch s.t. `aggregate_k_gradients` divides it.'
+        for batch, (data, targets, single_eval_pos) in enumerate(dl):
+            print("数据属性详细信息:")  
+            print(f"data 元组的长度: {len(data)}")  
+
+            # 打印 data 中每个元素的详细信息  
+            for i, item in enumerate(data):  
+                print(f"\ndata[{i}] 属性:")  
+                print(f"类型: {type(item)}")  
+
+                # 如果是张量，打印更多详细信息  
+                if isinstance(item, torch.Tensor):  
+                    print(f"形状: {item.shape}")  
+                    print(f"数据类型: {item.dtype}")  
+                    print(f"设备: {item.device}")  
+                    print(f"最小值: {item.min()}")  
+                    print(f"最大值: {item.max()}")  
+
+            # 打印 targets 的属性  
+            print("\ntargets 属性:")  
+            print(f"类型: {type(targets)}")  
+            print(f"形状: {targets.shape}")  
+            print(f"数据类型: {targets.dtype}")  
+
+            # 打印 single_eval_pos 的属性  
+            print("\nsingle_eval_pos 属性:")  
+            print(f"类型: {type(single_eval_pos)}")  
+            
+            # 只打印第一个 batch  
+            break  
         for batch, (data, targets, single_eval_pos) in enumerate(dl):
             if using_dist and not (batch % aggregate_k_gradients == aggregate_k_gradients - 1):
                 cm = model.no_sync()
@@ -323,6 +353,7 @@ if __name__ == '__main__':
     encoder = args.__dict__.pop('encoder')
     y_encoder = args.__dict__.pop('y_encoder')
 
+    '''
     def get_encoder_generator(encoder):
         if encoder == 'linear':
             encoder_generator = encoders.Linear
@@ -337,6 +368,35 @@ if __name__ == '__main__':
         else:
             raise NotImplementedError(f'A {encoder} encoder is not valid.')
         return encoder_generator
+    '''
+    
+    def get_encoder_generator(encoder):  
+        """  
+        根据编码器名称返回对应的编码器生成器。  
+
+        Parameters  
+        ----------  
+        encoder : str  
+            编码器名称，可选值为 'linear', 'mlp', 'positional', 'attention'。  
+
+        Returns  
+        -------  
+        encoder_generator : callable  
+            编码器生成器，用于创建指定类型的编码器。  
+        """  
+        if encoder == 'linear':  
+            encoder_generator = encoders.Linear  
+        elif encoder == 'mlp':  
+            encoder_generator = encoders.MLP  
+        elif encoder == 'positional':  
+            encoder_generator = encoders.Positional  
+        elif encoder == 'attention':  
+            # 确保 embed_dim 被设置为 512  
+            encoder_generator = partial(encoders.ModelWithAttention, embed_dim=512, n_steps=5)  
+            output_dim=print("Using ModelWithAttention as encoder_generator with embed_dim=512")  
+        else:  
+            raise NotImplementedError(f'A {encoder} encoder is not valid.')  
+        return encoder_generator  
 
     encoder_generator = get_encoder_generator(encoder)
     y_encoder_generator = get_encoder_generator(y_encoder)

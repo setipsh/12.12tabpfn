@@ -5,7 +5,7 @@ import torch.nn as nn
 from tabpfn.utils import normalize_data
 import torch.nn.functional as F
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
-
+from tabpfn.utils import SeqBN
 
 class StyleEncoder(nn.Module):
     def __init__(self, num_hyperparameters, em_size):
@@ -187,7 +187,7 @@ class NanHandlingEncoder(nn.Module):
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+'''   
 import math
 class AttentiveTransformer(nn.Module):
     def __init__(
@@ -328,37 +328,7 @@ class Linear(nn.Linear):
     def __setstate__(self, state):
         super().__setstate__(state)
         self.__dict__.setdefault('replace_nan_by_zero', True)
-   
-'''
-class ModelWithAttention(nn.Module):
-    def __init__(self, input_dim, emsize, output_dim, n_steps=3, gamma=1.3, epsilon=1e-15):
-        super(ModelWithAttention, self).__init__()
-        self.sequential_attention = SequentialAttention(
-            input_dim=input_dim,
-            emsize=emsize,
-            output_dim=output_dim,
-            n_steps=n_steps,
-            gamma=gamma,
-            epsilon=epsilon,
-        )
-        self.linear = Linear(emsize, output_dim)
 
-    def forward(self, x):
-        
-        
-        # 顺序注意力机制处理，得到筛选特征、M_loss 和注意力权重
-        filtered_features, M_loss, attention_weights_list = self.sequential_attention(x)
-
-        # 应用线性变换
-        output = self.linear(filtered_features)
-        
-        if not isinstance(filtered_features, torch.Tensor):
-            raise TypeError(f"Filtered features is not a tensor, got {type(filtered_features)}")
-
-        # 返回最终编码结果
-        return output  # 只返回 output
-
-    '''
 class ModelWithAttention(nn.Module):
     def __init__(self, input_dim, emsize, output_dim, n_steps=3, gamma=1.3, epsilon=1e-15):
         super(ModelWithAttention, self).__init__()
@@ -386,7 +356,203 @@ class ModelWithAttention(nn.Module):
         output = self.linear(filtered_features)
 
         return output
+'''
+
+import torch  
+import torch.nn as nn  
+import torch.nn.functional as F  
+
+class Sparsemax(nn.Module):  
+    def __init__(self, dim=-1):  
+ 
+        super(Sparsemax, self).__init__()  
+        self.dim = dim  
     
+    def forward(self, input):  
+        
+        # 修正 dim 索引  
+        dim = self.dim if self.dim >= 0 else input.dim() + self.dim  
+
+        # 对输入进行排序  
+        input_sorted, _ = torch.sort(input, descending=True, dim=dim)  
+        input_cumsum = torch.cumsum(input_sorted, dim=dim) - 1  
+
+        # 计算 rho  
+        rho = torch.arange(1, input.size(dim) + 1, device=input.device, dtype=input.dtype).reshape(  
+            [1 if i != dim else input.size(dim) for i in range(input.dim())]  
+        )    
+
+        # 计算支持集  
+        support = input_sorted > input_cumsum / rho  
+        support_size = support.sum(dim=dim, keepdim=True)   
+
+        # 计算 tau  
+        tau = (input_cumsum.gather(dim=dim, index=support_size - 1) / support_size).squeeze(dim)  
+        output = torch.clamp(input - tau.unsqueeze(dim), min=0)  
+        return output  
+
+from torch.nn import Linear, BatchNorm1d, ReLU
+import numpy as np    
+
+class SeqBN(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.bn = nn.BatchNorm1d(d_model)
+        self.d_model = d_model
+
+    def forward(self, x):
+        assert self.d_model == x.shape[-1]
+        flat_x = x.view(-1, self.d_model)
+        flat_x = self.bn(flat_x)
+        return flat_x.view(*x.shape)
+
+def glu(act, n_units):
+    
+    act[:, :n_units] = act[:, :n_units].clone() * torch.nn.Sigmoid()(act[:, n_units:].clone())     
+    
+    return act
+
+class TabNetModel(nn.Module):
+    
+    def __init__(
+        self,
+        columns = 3,
+        num_features = 100,
+        feature_dims = 128,
+        output_dim  =64,
+        n_steps =6,
+        relaxation_factor = 0.5,
+        batch_momentum = 0.001,
+        virtual_batch_size = 2,
+        num_classes = 2,
+        epsilon = 0.00001
+    ):
+        
+        super().__init__()
+        
+        self.sparsemax = Sparsemax(dim=-1)  
+        self.columns = columns
+        self.num_features  = num_features
+        self.feature_dims = feature_dims
+        self.output_dim = output_dim
+        self.n_steps = n_steps
+        self.relaxation_factor = relaxation_factor
+        self.batch_momentum = batch_momentum
+        self.virtual_batch_size = virtual_batch_size
+        self.num_classes = num_classes
+        self.epsilon = epsilon
+  
+        self.feature_transform_linear1 = torch.nn.Linear(num_features, self.feature_dims * 2, bias=False)
+        self.BN = torch.nn.BatchNorm1d(num_features, momentum = batch_momentum)
+        self.BN1 = torch.nn.BatchNorm1d(self.feature_dims * 2, momentum = batch_momentum)
+        
+        self.feature_transform_linear2 = torch.nn.Linear(self.feature_dims * 2, self.feature_dims * 2, bias=False)
+        self.feature_transform_linear3 = torch.nn.Linear(self.feature_dims * 2, self.feature_dims * 2, bias=False)
+        self.feature_transform_linear4 = torch.nn.Linear(self.feature_dims * 2, self.feature_dims * 2, bias=False)
+        
+        self.mask_linear_layer = torch.nn.Linear(self.feature_dims * 2-output_dim, self.num_features, bias=False)
+        self.BN2 = torch.nn.BatchNorm1d(self.num_features, momentum = batch_momentum)
+        
+        self.final_classifier_layer = torch.nn.Linear(self.output_dim, self.num_classes, bias=False)
+    
+        def encoder(self, data):
+        
+            batch_size = data.shape[0]
+            features = self.BN(data)
+            output_aggregated = torch.zeros([batch_size, self.output_dim])
+
+            masked_features = features
+            mask_values = torch.zeros([batch_size, self.num_features])
+
+            aggregated_mask_values = torch.zeros([batch_size, self.num_features])
+            complemantary_aggregated_mask_values =torch.ones([batch_size, self.num_features])
+
+            total_entropy = 0
+
+            for ni in range(self.n_steps):
+
+                if ni==0:
+
+                    transform_f1  = self.feature_transform_linear1(masked_features)
+                    norm_transform_f1 = self.BN1(transform_f1)
+
+                    transform_f2      = self.feature_transform_linear2(norm_transform_f1)
+                    norm_transform_f2 = self.BN1(transform_f2)
+
+                else:
+
+                    transform_f1 = self.feature_transform_linear1(masked_features)
+                    norm_transform_f1 = self.BN1(transform_f1)
+
+                    transform_f2      = self.feature_transform_linear2(norm_transform_f1)
+                    norm_transform_f2 = self.BN1(transform_f2)
+
+                    # GLU 
+                    transform_f2 = (glu(norm_transform_f2, self.feature_dims) +transform_f1) * np.sqrt(0.5)
+
+                    transform_f3 = self.feature_transform_linear3(transform_f2)
+                    norm_transform_f3 = self.BN1(transform_f3)
+
+                    transform_f4 = self.feature_transform_linear4(norm_transform_f3)
+                    norm_transform_f4 = self.BN1(transform_f4)
+
+                    # GLU
+                    transform_f4 = (glu(norm_transform_f4, self.feature_dims) + transform_f3) * np.sqrt(0.5)
+
+                    decision_out = torch.nn.ReLU(inplace=True)(transform_f4[:, :self.output_dim])
+                    # Decision aggregation
+                    output_aggregated  = torch.add(decision_out, output_aggregated)
+                    scale_agg = torch.sum(decision_out, axis=1, keepdim=True) / (self.n_steps - 1)
+                    aggregated_mask_values  = torch.add( aggregated_mask_values, mask_values * scale_agg)
+
+                    features_for_coef = (transform_f4[:, self.output_dim:])
+
+                    if ni<(self.n_steps-1):
+
+                        mask_linear_layer = self.mask_linear_layer(features_for_coef)
+                        mask_linear_norm = self.BN2(mask_linear_layer)
+                        mask_linear_norm  = torch.mul(mask_linear_norm, complemantary_aggregated_mask_values)
+                        mask_values = sparsemax(mask_linear_norm)
+
+                        complemantary_aggregated_mask_values = torch.mul(complemantary_aggregated_mask_values,self.relaxation_factor - mask_values)
+                        total_entropy = torch.add(total_entropy,torch.mean(torch.sum(-mask_values * torch.log(mask_values + self.epsilon),axis=1)) / (self.n_steps - 1))
+                        masked_features = torch.mul(mask_values , features)
+
+            return  output_aggregated, total_entropy
+
+class ModelWithAttention(nn.Module):  
+    def __init__(  
+        self,  
+        columns=3,  
+        num_features=100,  
+        feature_dims=128,  
+        output_dim=64,  
+        n_steps=6,  
+        embedding_dim=512  
+    ):  
+        super().__init__() 
+
+        # TabNet编码器  
+        self.tabnet_encoder = TabNetModel(  
+            columns=columns,  
+            num_features=num_features,  
+            feature_dims=feature_dims,  
+            output_dim=output_dim,  
+            n_steps=n_steps  
+        )  
+        
+        # 特征映射到512维的线性层  
+        self.embedding_layer = nn.Linear(output_dim, embedding_dim)  
+    
+    def forward(self, x): 
+        print(f"Forward 输入形状: {x.shape}") 
+        # 使用TabNet编码器  
+        output_aggregated, entropy = self.tabnet_encoder.encoder(x)  
+        
+        # 线性层将特征嵌入到512维  
+        embedded_features = self.embedding_layer(output_aggregated)  
+        
+        return embedded_features, entropy 
 
 class Conv(nn.Module):
     def __init__(self, input_size, emsize):

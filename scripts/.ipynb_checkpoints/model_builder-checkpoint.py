@@ -50,7 +50,8 @@ def load_model_only_inference(path, filename, device):
         ('nan_prob_unknown_reason' in config_sample and config_sample['nan_prob_unknown_reason'] > 0.0)):
         encoder = encoders.NanHandlingEncoder
     else:
-        encoder = partial(encoders.ModelWithAttention, output_dim=config_sample['output_dim'], n_steps=3, gamma=1.3, epsilon=1e-15)
+        #encoder = partial(encoders.ModelWithAttention, output_dim=config_sample['output_dim'], n_steps=3, gamma=1.3, epsilon=1e-15)
+        encoder = partial(encoders.ModelWithAttention, output_dim=config_sample['output_dim'], n_steps=5)
     
     n_out = config_sample['max_num_classes']
 
@@ -58,10 +59,10 @@ def load_model_only_inference(path, filename, device):
     encoder = encoder(
             config_sample['num_features'],  # 输入特征数
             config_sample['emsize'],       # 嵌入维度
-            #config_sample['output_dim'],  # 输出维度
-            n_steps=3,                     # 注意力机制步骤数
-            gamma=1.3,                     # gamma 参数
-            epsilon=1e-15                  # epsilon 参数
+            n_steps=5,                     # 注意力机制步骤数
+            #gamma=1.3,                     # gamma 参数
+            output_dim=512
+            #epsilon=1e-15                  # epsilon 参数
         )
     print(f"Initialized encoder: {encoder}")
     
@@ -83,7 +84,11 @@ def load_model_only_inference(path, filename, device):
     model.criterion = loss
     module_prefix = 'module.'
     model_state = {k.replace(module_prefix, ''): v for k, v in model_state.items()}
-    model.load_state_dict(model_state)
+    
+    # 加载模型权重，允许忽略缺失的键  
+    model.load_state_dict(model_state, strict=False)
+    
+    #model.load_state_dict(model_state)
     model.to(device)
     model.eval()
 
@@ -277,8 +282,9 @@ def get_model(config, device, should_train=True, verbose=False, state_dict=None,
         encoder = encoders.NanHandlingEncoder
     else:
         #encoder = partial(encoders.Linear, replace_nan_by_zero=True)
+        #encoder = partial(encoders.ModelWithAttention, n_steps=3, gamma=1.3, epsilon=1e-15)   # 替换为 ModelWithAttention
         encoder = partial(encoders.ModelWithAttention,  # 替换为 ModelWithAttention
-                              n_steps=3, gamma=1.3, epsilon=1e-15)
+                              n_steps=5)
 
     if config['max_num_classes'] == 2:
         loss = Losses.bce

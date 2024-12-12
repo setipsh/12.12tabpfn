@@ -139,6 +139,8 @@ class TabPFNClassifier(BaseEstimator, ClassifierMixin):
                  feature_shift_decoder=True, only_inference=True, seed=0, no_grad=True, batch_size_inference=32,
                  subsample_features=False,
                  model_file = True):
+        
+            
         """
         Initializes the classifier and loads the model. 
         Depending on the arguments, the model is either loaded from memory, from a file, or downloaded from the 
